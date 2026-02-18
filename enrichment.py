@@ -77,9 +77,9 @@ def get_impact_factor(journal: str, if_dict: dict[str, float]) -> str:
 
 # クォータ超過時のフォールバックモデル順序
 FALLBACK_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
     "gemini-2.0-flash",
-    "gemini-1.5-flash",
-    "gemini-1.5-pro",
 ]
 
 
@@ -195,7 +195,7 @@ def summarize_abstract(
 def enrich_articles(
     articles: list[dict[str, Any]],
     gemini_api_key: str = "",
-    gemini_model_name: str = "gemini-2.0-flash",
+    gemini_model_name: str = "gemini-2.5-flash",
     if_csv_path: str | Path = DEFAULT_IF_CSV,
 ) -> list[dict[str, Any]]:
     """論文リストに IF と AI 要約を付与する。

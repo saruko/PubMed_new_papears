@@ -81,7 +81,7 @@ KEYWORD_MAP: dict[str, str] = {
 
 
 def translate_keyword(
-    jp_keyword: str, gemini_client=None, gemini_model_name: str = "gemini-2.0-flash"
+    jp_keyword: str, gemini_client=None, gemini_model_name: str = "gemini-2.5-flash"
 ) -> str:
     """日本語キーワードを英語医学用語に変換する。
 
