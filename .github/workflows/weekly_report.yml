@@ -1,0 +1,78 @@
+name: PubMed 新着論文レポート
+
+on:
+  # 毎週日曜 UTC 0:00 (JST 9:00) に自動実行
+  schedule:
+    - cron: '0 0 * * 0'
+
+  # 手動実行（デバッグ用）
+  workflow_dispatch:
+    inputs:
+      keyword:
+        description: '検索キーワード（日本語 or 英語）'
+        required: false
+        default: ''
+      days:
+        description: '過去何日分を取得するか'
+        required: false
+        default: '7'
+      debug:
+        description: 'デバッグモード（true: メール送信なし、HTML をアーティファクトに保存）'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+jobs:
+  send-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Python をセットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 依存パッケージをインストール
+        run: pip install -r requirements.txt
+
+      - name: レポートを生成・送信
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ENTREZ_EMAIL: ${{ secrets.ENTREZ_EMAIL }}
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          RECIPIENT_EMAILS: ${{ secrets.RECIPIENT_EMAILS }}
+          SEARCH_KEYWORDS: ${{ secrets.SEARCH_KEYWORDS || '眼科' }}
+        run: |
+          # 手動実行時のパラメータを処理
+          ARGS=""
+          if [ "${{ github.event.inputs.keyword }}" != "" ]; then
+            ARGS="$ARGS --keyword '${{ github.event.inputs.keyword }}'"
+          fi
+          if [ "${{ github.event.inputs.days }}" != "" ] && [ "${{ github.event.inputs.days }}" != "7" ]; then
+            ARGS="$ARGS --days ${{ github.event.inputs.days }}"
+          fi
+          if [ "${{ github.event.inputs.debug }}" == "true" ]; then
+            ARGS="$ARGS --debug --output debug_report.html"
+          fi
+
+          echo "実行コマンド: python main.py $ARGS -v"
+          eval "python main.py $ARGS -v"
+
+      - name: デバッグレポートをアーティファクトとして保存
+        if: ${{ github.event.inputs.debug == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-report
+          path: debug_report.html
+          retention-days: 7
