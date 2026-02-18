@@ -176,12 +176,35 @@ def enrich_articles(
     if gemini_api_key:
         try:
             import google.generativeai as genai
+            from google.generativeai.types import HarmBlockThreshold, HarmCategory
 
             genai.configure(api_key=gemini_api_key)
-            model = genai.GenerativeModel(gemini_model_name)
-            logger.info("Gemini モデル '%s' を初期化しました。", gemini_model_name)
-        except Exception:
-            logger.error("Gemini モデルの初期化に失敗しました。", exc_info=True)
+
+            # 医学コンテンツがブロックされないようセーフティ設定を緩和
+            safety_settings = {
+                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+            }
+
+            model = genai.GenerativeModel(
+                gemini_model_name,
+                safety_settings=safety_settings,
+            )
+
+            # テスト呼び出しで動作確認
+            test_response = model.generate_content("Hello")
+            test_text = test_response.text
+            logger.info(
+                "Gemini モデル '%s' の初期化・テスト成功（応答: %s）",
+                gemini_model_name,
+                test_text[:30] if test_text else "(空)",
+            )
+        except Exception as e:
+            logger.error(
+                "Gemini モデルの初期化/テストに失敗しました: %s", str(e), exc_info=True
+            )
             model = None
     else:
         logger.warning(
