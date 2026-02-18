@@ -1,6 +1,6 @@
 """メタデータ付与モジュール。
 
-Gemini API による日本語要約と、ジャーナルインパクトファクター（IF）の付与を行う。
+google.genai（新SDK）による日本語要約と、ジャーナルインパクトファクター（IF）の付与を行う。
 """
 
 from __future__ import annotations
@@ -75,12 +75,13 @@ def get_impact_factor(journal: str, if_dict: dict[str, float]) -> str:
     return "N/A"
 
 
-def summarize_abstract(abstract: str, model, max_retries: int = 2) -> str:
+def summarize_abstract(abstract: str, client, model_name: str, max_retries: int = 2) -> str:
     """Gemini API を使用して抄録を日本語で3行要約する。
 
     Args:
         abstract: 英語の抄録テキスト
-        model: google.generativeai.GenerativeModel インスタンス
+        client: google.genai.Client インスタンス
+        model_name: Gemini モデル名
         max_retries: 失敗時のリトライ回数
 
     Returns:
@@ -88,6 +89,8 @@ def summarize_abstract(abstract: str, model, max_retries: int = 2) -> str:
     """
     if not abstract or not abstract.strip():
         return "抄録なし"
+
+    from google.genai import types
 
     prompt = (
         "あなたは医学論文の専門家です。以下の英語の論文抄録を、"
@@ -97,52 +100,52 @@ def summarize_abstract(abstract: str, model, max_retries: int = 2) -> str:
         f"抄録:\n{abstract}"
     )
 
+    # セーフティ設定（医学コンテンツがブロックされないよう緩和）
+    safety_settings = [
+        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+        types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+    ]
+
     for attempt in range(max_retries + 1):
         try:
-            response = model.generate_content(prompt)
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    safety_settings=safety_settings,
+                ),
+            )
 
-            # セーフティフィルタでブロックされた場合の対応
-            if response.candidates:
-                candidate = response.candidates[0]
-                # finish_reason が SAFETY の場合
-                if hasattr(candidate, 'finish_reason') and candidate.finish_reason != 1:
-                    reason = getattr(candidate, 'finish_reason', 'UNKNOWN')
-                    logger.warning(
-                        "Gemini 応答がブロックされました (finish_reason=%s)", reason
-                    )
-                    truncated = abstract[:200] + ("..." if len(abstract) > 200 else "")
-                    return f"（セーフティフィルタにより要約不可）{truncated}"
-
-                # parts から安全にテキストを取得
-                if candidate.content and candidate.content.parts:
-                    summary = candidate.content.parts[0].text.strip()
-                    if summary:
-                        logger.debug("要約生成完了（%d 文字）", len(summary))
-                        return summary
-
-            # response.text にフォールバック
-            try:
+            # テキストを取得
+            if response.text:
                 summary = response.text.strip()
                 if summary:
                     logger.debug("要約生成完了（%d 文字）", len(summary))
                     return summary
-            except (ValueError, AttributeError) as e:
-                logger.warning("response.text の取得に失敗: %s", e)
 
             logger.warning("Gemini 応答が空でした（試行 %d/%d）", attempt + 1, max_retries + 1)
 
         except Exception as e:
+            error_msg = str(e)
             logger.warning(
                 "AI 要約の生成に失敗（試行 %d/%d）: %s",
                 attempt + 1,
                 max_retries + 1,
-                str(e),
-                exc_info=True,
+                error_msg,
             )
 
-        # リトライ前に待機
+            # レート制限エラー（429）の場合は長めに待機
+            if "429" in error_msg or "ResourceExhausted" in error_msg:
+                wait = 60 * (attempt + 1)
+                logger.info("  → レート制限検出。%d 秒待機します...", wait)
+                time.sleep(wait)
+                continue
+
+        # 通常のリトライ待機
         if attempt < max_retries:
-            wait = 2 * (attempt + 1)
+            wait = 3 * (attempt + 1)
             logger.info("  → %d 秒後にリトライします...", wait)
             time.sleep(wait)
 
@@ -171,41 +174,29 @@ def enrich_articles(
     # IF 辞書を読み込み
     if_dict = load_impact_factors(if_csv_path)
 
-    # Gemini モデルを初期化
-    model = None
+    # Gemini クライアントを初期化
+    client = None
     if gemini_api_key:
         try:
-            import google.generativeai as genai
-            from google.generativeai.types import HarmBlockThreshold, HarmCategory
+            from google import genai
 
-            genai.configure(api_key=gemini_api_key)
-
-            # 医学コンテンツがブロックされないようセーフティ設定を緩和
-            safety_settings = {
-                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-            }
-
-            model = genai.GenerativeModel(
-                gemini_model_name,
-                safety_settings=safety_settings,
-            )
+            client = genai.Client(api_key=gemini_api_key)
 
             # テスト呼び出しで動作確認
-            test_response = model.generate_content("Hello")
-            test_text = test_response.text
+            test_response = client.models.generate_content(
+                model=gemini_model_name,
+                contents="Say hello in one word.",
+            )
             logger.info(
                 "Gemini モデル '%s' の初期化・テスト成功（応答: %s）",
                 gemini_model_name,
-                test_text[:30] if test_text else "(空)",
+                (test_response.text or "")[:30],
             )
         except Exception as e:
             logger.error(
-                "Gemini モデルの初期化/テストに失敗しました: %s", str(e), exc_info=True
+                "Gemini の初期化/テストに失敗: %s", str(e), exc_info=True
             )
-            model = None
+            client = None
     else:
         logger.warning(
             "GEMINI_API_KEY が未設定のため、AI 要約をスキップします。"
@@ -219,8 +210,10 @@ def enrich_articles(
 
         # AI 要約
         abstract = article.get("abstract", "")
-        if model and abstract:
-            article["summary_ja"] = summarize_abstract(abstract, model)
+        if client and abstract:
+            article["summary_ja"] = summarize_abstract(
+                abstract, client, gemini_model_name
+            )
             # Gemini API レート制限対策（RPM を考慮して待機）
             if i < len(articles) - 1:
                 time.sleep(4.0)

@@ -80,7 +80,9 @@ KEYWORD_MAP: dict[str, str] = {
 }
 
 
-def translate_keyword(jp_keyword: str, gemini_model=None) -> str:
+def translate_keyword(
+    jp_keyword: str, gemini_client=None, gemini_model_name: str = "gemini-2.0-flash"
+) -> str:
     """日本語キーワードを英語医学用語に変換する。
 
     1. 組込み辞書を検索
@@ -89,7 +91,8 @@ def translate_keyword(jp_keyword: str, gemini_model=None) -> str:
 
     Args:
         jp_keyword: 日本語キーワード
-        gemini_model: google.generativeai.GenerativeModel インスタンス（任意）
+        gemini_client: google.genai.Client インスタンス（任意）
+        gemini_model_name: 使用する Gemini モデル名
 
     Returns:
         英語の医学用語
@@ -108,7 +111,7 @@ def translate_keyword(jp_keyword: str, gemini_model=None) -> str:
         return translated
 
     # Gemini API で翻訳
-    if gemini_model is not None:
+    if gemini_client is not None:
         try:
             prompt = (
                 f"以下の日本語の医学用語を、PubMedで検索するための"
@@ -116,7 +119,10 @@ def translate_keyword(jp_keyword: str, gemini_model=None) -> str:
                 f"英語の医学用語のみを出力し、それ以外は何も出力しないでください。\n\n"
                 f"日本語: {keyword}"
             )
-            response = gemini_model.generate_content(prompt)
+            response = gemini_client.models.generate_content(
+                model=gemini_model_name,
+                contents=prompt,
+            )
             translated = response.text.strip()
             logger.info("Gemini 翻訳: '%s' → '%s'", keyword, translated)
             return translated

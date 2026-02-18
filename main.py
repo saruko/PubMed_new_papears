@@ -125,18 +125,19 @@ def main() -> int:
     # ========== キーワード変換 ==========
     logger.info("検索キーワード（日本語）: %s", keyword_ja)
 
-    # Gemini モデルをキーワード翻訳用に初期化（可能な場合）
-    gemini_model_for_translate = None
+    # Gemini クライアントをキーワード翻訳用に初期化（可能な場合）
+    gemini_client_for_translate = None
     if config.gemini_api_key:
         try:
-            import google.generativeai as genai
+            from google import genai
 
-            genai.configure(api_key=config.gemini_api_key)
-            gemini_model_for_translate = genai.GenerativeModel(config.gemini_model)
+            gemini_client_for_translate = genai.Client(api_key=config.gemini_api_key)
         except Exception:
-            logger.warning("Gemini モデルの初期化に失敗（翻訳）。辞書のみ使用します。")
+            logger.warning("Gemini クライアントの初期化に失敗（翻訳）。辞書のみ使用します。")
 
-    keyword_en = translate_keyword(keyword_ja, gemini_model_for_translate)
+    keyword_en = translate_keyword(
+        keyword_ja, gemini_client_for_translate, config.gemini_model
+    )
     logger.info("検索キーワード（英語）: %s", keyword_en)
 
     # ========== PubMed 検索 ==========

@@ -99,7 +99,7 @@ class TestKeywordTranslator:
 
     def test_unknown_keyword_without_gemini(self):
         """辞書にない用語（Gemini なし）はそのまま返す。"""
-        result = translate_keyword("未知の用語テスト", gemini_model=None)
+        result = translate_keyword("未知の用語テスト", gemini_client=None)
         assert result == "未知の用語テスト"
 
 
