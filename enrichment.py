@@ -75,12 +75,13 @@ def get_impact_factor(journal: str, if_dict: dict[str, float]) -> str:
     return "N/A"
 
 
-def summarize_abstract(abstract: str, model) -> str:
+def summarize_abstract(abstract: str, model, max_retries: int = 2) -> str:
     """Gemini API を使用して抄録を日本語で3行要約する。
 
     Args:
         abstract: 英語の抄録テキスト
         model: google.generativeai.GenerativeModel インスタンス
+        max_retries: 失敗時のリトライ回数
 
     Returns:
         日本語の3行要約
@@ -88,23 +89,66 @@ def summarize_abstract(abstract: str, model) -> str:
     if not abstract or not abstract.strip():
         return "抄録なし"
 
-    try:
-        prompt = (
-            "あなたは医学論文の専門家です。以下の英語の論文抄録を、"
-            "日本語で3行に要約してください。\n"
-            "各行は「・」で始め、専門用語は正確に使用してください。\n"
-            "出力は要約のみとし、それ以外の文は含めないでください。\n\n"
-            f"抄録:\n{abstract}"
-        )
-        response = model.generate_content(prompt)
-        summary = response.text.strip()
-        logger.debug("要約生成完了（%d 文字）", len(summary))
-        return summary
-    except Exception:
-        logger.warning("AI 要約の生成に失敗しました。", exc_info=True)
-        # フォールバック: 抄録の先頭200文字
-        truncated = abstract[:200] + ("..." if len(abstract) > 200 else "")
-        return f"（要約失敗・原文抜粋）{truncated}"
+    prompt = (
+        "あなたは医学論文の専門家です。以下の英語の論文抄録を、"
+        "日本語で3行に要約してください。\n"
+        "各行は「・」で始め、専門用語は正確に使用してください。\n"
+        "出力は要約のみとし、それ以外の文は含めないでください。\n\n"
+        f"抄録:\n{abstract}"
+    )
+
+    for attempt in range(max_retries + 1):
+        try:
+            response = model.generate_content(prompt)
+
+            # セーフティフィルタでブロックされた場合の対応
+            if response.candidates:
+                candidate = response.candidates[0]
+                # finish_reason が SAFETY の場合
+                if hasattr(candidate, 'finish_reason') and candidate.finish_reason != 1:
+                    reason = getattr(candidate, 'finish_reason', 'UNKNOWN')
+                    logger.warning(
+                        "Gemini 応答がブロックされました (finish_reason=%s)", reason
+                    )
+                    truncated = abstract[:200] + ("..." if len(abstract) > 200 else "")
+                    return f"（セーフティフィルタにより要約不可）{truncated}"
+
+                # parts から安全にテキストを取得
+                if candidate.content and candidate.content.parts:
+                    summary = candidate.content.parts[0].text.strip()
+                    if summary:
+                        logger.debug("要約生成完了（%d 文字）", len(summary))
+                        return summary
+
+            # response.text にフォールバック
+            try:
+                summary = response.text.strip()
+                if summary:
+                    logger.debug("要約生成完了（%d 文字）", len(summary))
+                    return summary
+            except (ValueError, AttributeError) as e:
+                logger.warning("response.text の取得に失敗: %s", e)
+
+            logger.warning("Gemini 応答が空でした（試行 %d/%d）", attempt + 1, max_retries + 1)
+
+        except Exception as e:
+            logger.warning(
+                "AI 要約の生成に失敗（試行 %d/%d）: %s",
+                attempt + 1,
+                max_retries + 1,
+                str(e),
+                exc_info=True,
+            )
+
+        # リトライ前に待機
+        if attempt < max_retries:
+            wait = 2 * (attempt + 1)
+            logger.info("  → %d 秒後にリトライします...", wait)
+            time.sleep(wait)
+
+    # 全リトライ失敗時のフォールバック
+    truncated = abstract[:200] + ("..." if len(abstract) > 200 else "")
+    return f"（要約失敗・原文抜粋）{truncated}"
 
 
 def enrich_articles(
@@ -156,7 +200,7 @@ def enrich_articles(
             article["summary_ja"] = summarize_abstract(abstract, model)
             # Gemini API レート制限対策（RPM を考慮して待機）
             if i < len(articles) - 1:
-                time.sleep(1.0)
+                time.sleep(4.0)
         else:
             if abstract:
                 truncated = abstract[:200] + ("..." if len(abstract) > 200 else "")
