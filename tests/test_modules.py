@@ -13,7 +13,7 @@ import pytest
 
 # テスト対象モジュール
 from config import Config
-from enrichment import get_impact_factor, load_impact_factors
+from enrichment import _get_fallback_models, get_impact_factor, load_impact_factors
 from keyword_translator import KEYWORD_MAP, translate_keyword
 from reporter import build_html_report
 
@@ -125,6 +125,18 @@ class TestEnrichment:
         """存在しないファイルの場合は空辞書。"""
         if_dict = load_impact_factors("/nonexistent/path.csv")
         assert if_dict == {}
+
+    def test_get_fallback_models(self):
+        """フォールバックモデルの生成ロジックをテスト。"""
+        # 2.5系の場合はそのまま先頭
+        models_25 = _get_fallback_models("gemini-2.5-flash")
+        assert models_25[0] == "gemini-2.5-flash"
+
+        # 2.0系の場合は警告が出つつ、2.5系が優先される（リストに含まれる）
+        models_20 = _get_fallback_models("gemini-2.0-flash")
+        assert "gemini-2.0-flash" not in models_20 # 除外されているはず
+        assert "gemini-2.5-flash" in models_20
+        assert models_20[0] == "gemini-2.5-flash"
 
     def test_get_impact_factor_exact(self):
         """完全一致でのIF検索。"""

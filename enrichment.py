@@ -76,19 +76,36 @@ def get_impact_factor(journal: str, if_dict: dict[str, float]) -> str:
 
 
 # クォータ超過時のフォールバックモデル順序
+# 2.0系はフリープランで利用不可のため、2.5系を優先
 FALLBACK_MODELS = [
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
-    "gemini-2.0-flash",
+    # "gemini-2.0-flash",  # クォータ0のため除外
+    # "gemini-2.0-flash-lite", # クォータ0のため除外
 ]
 
 
 def _get_fallback_models(primary_model: str) -> list[str]:
-    """プライマリモデルを先頭にしたフォールバックリストを生成する。"""
-    models = [primary_model]
+    """プライマリモデルを先頭にしたフォールバックリストを生成する。
+    ただし、2.0系（クォータ0）の場合はリストから除外/後回しにする。
+    """
+    models = []
+    
+    # プライマリモデルが2.5系なら先頭に追加
+    if "2.5" in primary_model:
+        models.append(primary_model)
+    elif "2.0" in primary_model:
+        logger.warning(
+            "モデル '%s' はフリープランのクォータが0の可能性があります。"
+            "gemini-2.5-flash 系を優先します。",
+            primary_model
+        )
+
+    # フォールバックモデルを追加
     for m in FALLBACK_MODELS:
         if m not in models:
             models.append(m)
+            
     return models
 
 
@@ -214,8 +231,10 @@ def enrich_articles(
 
     # Gemini クライアントを初期化
     client = None
-    active_model = gemini_model_name
+    
+    # モデルリストを生成（2.0系なら2.5系を優先）
     fallback_models = _get_fallback_models(gemini_model_name)
+    active_model = fallback_models[0] # デフォルトはリスト先頭
 
     if gemini_api_key:
         try:
