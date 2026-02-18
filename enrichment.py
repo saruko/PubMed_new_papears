@@ -75,14 +75,40 @@ def get_impact_factor(journal: str, if_dict: dict[str, float]) -> str:
     return "N/A"
 
 
-def summarize_abstract(abstract: str, client, model_name: str, max_retries: int = 2) -> str:
+# クォータ超過時のフォールバックモデル順序
+FALLBACK_MODELS = [
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+]
+
+
+def _get_fallback_models(primary_model: str) -> list[str]:
+    """プライマリモデルを先頭にしたフォールバックリストを生成する。"""
+    models = [primary_model]
+    for m in FALLBACK_MODELS:
+        if m not in models:
+            models.append(m)
+    return models
+
+
+def summarize_abstract(
+    abstract: str,
+    client,
+    model_name: str,
+    fallback_models: list[str] | None = None,
+    max_retries: int = 1,
+) -> str:
     """Gemini API を使用して抄録を日本語で3行要約する。
+
+    クォータ超過時は自動的にフォールバックモデルに切り替える。
 
     Args:
         abstract: 英語の抄録テキスト
         client: google.genai.Client インスタンス
-        model_name: Gemini モデル名
-        max_retries: 失敗時のリトライ回数
+        model_name: プライマリ Gemini モデル名
+        fallback_models: フォールバックモデル名のリスト（None の場合は自動生成）
+        max_retries: 各モデルでの失敗時のリトライ回数
 
     Returns:
         日本語の3行要約
@@ -108,48 +134,60 @@ def summarize_abstract(abstract: str, client, model_name: str, max_retries: int 
         types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
     ]
 
-    for attempt in range(max_retries + 1):
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    safety_settings=safety_settings,
-                ),
-            )
+    models_to_try = fallback_models or _get_fallback_models(model_name)
 
-            # テキストを取得
-            if response.text:
-                summary = response.text.strip()
-                if summary:
-                    logger.debug("要約生成完了（%d 文字）", len(summary))
-                    return summary
+    for model in models_to_try:
+        for attempt in range(max_retries + 1):
+            try:
+                response = client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        safety_settings=safety_settings,
+                    ),
+                )
 
-            logger.warning("Gemini 応答が空でした（試行 %d/%d）", attempt + 1, max_retries + 1)
+                if response.text:
+                    summary = response.text.strip()
+                    if summary:
+                        logger.debug(
+                            "要約生成完了（モデル: %s, %d 文字）", model, len(summary)
+                        )
+                        return summary
 
-        except Exception as e:
-            error_msg = str(e)
-            logger.warning(
-                "AI 要約の生成に失敗（試行 %d/%d）: %s",
-                attempt + 1,
-                max_retries + 1,
-                error_msg,
-            )
+                logger.warning(
+                    "Gemini 応答が空（モデル: %s, 試行 %d/%d）",
+                    model, attempt + 1, max_retries + 1,
+                )
 
-            # レート制限エラー（429）の場合は長めに待機
-            if "429" in error_msg or "ResourceExhausted" in error_msg:
-                wait = 60 * (attempt + 1)
-                logger.info("  → レート制限検出。%d 秒待機します...", wait)
+            except Exception as e:
+                error_msg = str(e)
+
+                # クォータ超過 → 次のモデルにフォールバック
+                if "429" in error_msg or "ResourceExhausted" in error_msg:
+                    logger.warning(
+                        "モデル '%s' のクォータ超過を検出。次のモデルに切り替えます。",
+                        model,
+                    )
+                    break  # 内側ループを抜けて次のモデルへ
+
+                logger.warning(
+                    "AI 要約失敗（モデル: %s, 試行 %d/%d）: %s",
+                    model, attempt + 1, max_retries + 1, error_msg,
+                )
+
+            # リトライ待機
+            if attempt < max_retries:
+                wait = 3 * (attempt + 1)
+                logger.info("  → %d 秒後にリトライします...", wait)
                 time.sleep(wait)
-                continue
+        else:
+            # for ループが break せずに完了 = 全リトライ失敗（クォータ超過以外）
+            continue
+        # break で抜けた = クォータ超過 → 次のモデルへ continue
+        continue
 
-        # 通常のリトライ待機
-        if attempt < max_retries:
-            wait = 3 * (attempt + 1)
-            logger.info("  → %d 秒後にリトライします...", wait)
-            time.sleep(wait)
-
-    # 全リトライ失敗時のフォールバック
+    # 全モデル・全リトライ失敗時のフォールバック
     truncated = abstract[:200] + ("..." if len(abstract) > 200 else "")
     return f"（要約失敗・原文抜粋）{truncated}"
 
@@ -176,22 +214,43 @@ def enrich_articles(
 
     # Gemini クライアントを初期化
     client = None
+    active_model = gemini_model_name
+    fallback_models = _get_fallback_models(gemini_model_name)
+
     if gemini_api_key:
         try:
             from google import genai
 
             client = genai.Client(api_key=gemini_api_key)
 
-            # テスト呼び出しで動作確認
-            test_response = client.models.generate_content(
-                model=gemini_model_name,
-                contents="Say hello in one word.",
-            )
-            logger.info(
-                "Gemini モデル '%s' の初期化・テスト成功（応答: %s）",
-                gemini_model_name,
-                (test_response.text or "")[:30],
-            )
+            # テスト呼び出しで動作確認（フォールバック付き）
+            test_ok = False
+            for model in fallback_models:
+                try:
+                    test_response = client.models.generate_content(
+                        model=model,
+                        contents="Say hello in one word.",
+                    )
+                    active_model = model
+                    logger.info(
+                        "Gemini モデル '%s' の初期化・テスト成功（応答: %s）",
+                        model,
+                        (test_response.text or "")[:30],
+                    )
+                    test_ok = True
+                    break
+                except Exception as e:
+                    if "429" in str(e) or "ResourceExhausted" in str(e):
+                        logger.warning(
+                            "モデル '%s' はクォータ超過。次のモデルを試行します。", model
+                        )
+                        continue
+                    raise  # 429 以外のエラーは再送出
+
+            if not test_ok:
+                logger.error("全モデルのクォータが超過しています。AI要約は利用できません。")
+                client = None
+
         except Exception as e:
             logger.error(
                 "Gemini の初期化/テストに失敗: %s", str(e), exc_info=True
@@ -212,7 +271,7 @@ def enrich_articles(
         abstract = article.get("abstract", "")
         if client and abstract:
             article["summary_ja"] = summarize_abstract(
-                abstract, client, gemini_model_name
+                abstract, client, active_model, fallback_models
             )
             # Gemini API レート制限対策（RPM を考慮して待機）
             if i < len(articles) - 1:
