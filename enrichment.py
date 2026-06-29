@@ -54,13 +54,9 @@ def _fetch_openalex_citedness(journal: str) -> float | None:
     Returns:
         2年平均被引用数（float）。取得失敗時は None。
     """
+    # search= を使用（filter+select の組み合わせだと数字始まりフィールド名で400エラー）
     encoded = urllib.parse.quote(journal)
-    url = (
-        f"https://api.openalex.org/sources"
-        f"?filter=display_name.search:{encoded}"
-        f"&per-page=1"
-        f"&select=display_name,2yr_mean_citedness"
-    )
+    url = f"https://api.openalex.org/sources?search={encoded}&per-page=1"
     try:
         req = urllib.request.Request(
             url,
@@ -70,7 +66,8 @@ def _fetch_openalex_citedness(journal: str) -> float | None:
             data = json.loads(resp.read().decode("utf-8"))
         results = data.get("results", [])
         if results:
-            val = results[0].get("2yr_mean_citedness")
+            # 2yr_mean_citedness は summary_stats の中に格納されている
+            val = results[0].get("summary_stats", {}).get("2yr_mean_citedness")
             return float(val) if val is not None else None
     except Exception as e:
         logger.warning("OpenAlex API エラー (%s): %s", journal, e)
