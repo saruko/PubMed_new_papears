@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -47,20 +49,26 @@ def save_openalex_cache(cache: dict[str, float | None], cache_path: Path = DEFAU
 
 def _query_openalex(search_term: str) -> float | None:
     """OpenAlex API に1回問い合わせてジャーナルの2年平均被引用数を返す。"""
-    import re as _re
-    encoded = urllib.parse.quote(search_term)
-    url = f"https://api.openalex.org/sources?search={encoded}&per-page=1"
+    params: dict[str, str] = {"search": search_term, "per-page": "1"}
+    email = os.environ.get("ENTREZ_EMAIL", "")
+    if email:
+        params["mailto"] = email
+    url = "https://api.openalex.org/sources?" + urllib.parse.urlencode(params)
+    logger.debug("OpenAlex API 問い合わせ: %s", url)
     try:
         req = urllib.request.Request(
             url,
             headers={"User-Agent": "PubMedReporter/1.0"},
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         results = data.get("results", [])
         if results:
             val = results[0].get("summary_stats", {}).get("2yr_mean_citedness")
             return float(val) if val is not None else None
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")[:300]
+        logger.warning("OpenAlex API HTTP %d エラー (%s): %s", e.code, search_term, body)
     except Exception as e:
         logger.warning("OpenAlex API エラー (%s): %s", search_term, e)
     return None
