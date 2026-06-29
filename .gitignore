@@ -24,6 +24,14 @@ env/
 
 # Debug output
 debug_report.html
+report_fallback.html
+
+# OpenAlex cache (auto-generated)
+data/openalex_cache.json
+
+# Claude Code local config
+claude.md
+CLAUDE.md
 
 # OS
 .DS_Store

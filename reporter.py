@@ -69,7 +69,7 @@ def build_html_report(
                         border-radius: 12px;
                         font-size: 12px;
                         margin-left: 4px;
-                    ">IF: {art.get("impact_factor", "N/A")}</span>
+                    ">2yr被引用数: {art.get("impact_factor", "N/A")}</span>
                 </div>
                 <a href="{art.get('url', '#')}" style="
                     color: #1a0dab;
@@ -151,7 +151,7 @@ def build_html_report(
             color: #999;
         ">
             このレポートは PubMed API + Gemini AI により自動生成されています。<br>
-            IF 値は参考値であり、最新のデータと異なる場合があります。
+            被引用数は OpenAlex API から取得した2年平均値です（参考値）。
         </div>
     </div>
 </body>

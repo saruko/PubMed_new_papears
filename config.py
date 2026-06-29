@@ -22,7 +22,7 @@ class Config:
 
     # --- Gemini API ---
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3.1-flash-lite"
 
     # --- PubMed ---
     entrez_email: str = ""
@@ -55,7 +55,7 @@ class Config:
 
         return cls(
             gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
-            gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+            gemini_model=os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite"),
             entrez_email=os.getenv("ENTREZ_EMAIL", ""),
             search_keywords=os.getenv("SEARCH_KEYWORDS", "眼科"),
             search_days=int(os.getenv("SEARCH_DAYS", "7")),

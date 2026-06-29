@@ -1,111 +1,132 @@
 """メタデータ付与モジュール。
 
-google.genai（新SDK）による日本語要約と、ジャーナルインパクトファクター（IF）の付与を行う。
+google.genai（新SDK）による日本語要約と、ジャーナルの2年平均被引用数
+（インパクトファクター代用）の付与を行う。
+被引用数は OpenAlex API から自動取得し、JSON ファイルにキャッシュする。
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
-
 logger = logging.getLogger(__name__)
 
-# プロジェクトルートからの相対パス
-DEFAULT_IF_CSV = Path(__file__).resolve().parent / "data" / "journal_if.csv"
+DEFAULT_CACHE_PATH = Path(__file__).resolve().parent / "data" / "openalex_cache.json"
 
 
-def load_impact_factors(csv_path: str | Path = DEFAULT_IF_CSV) -> dict[str, float]:
-    """ジャーナル IF の CSV を読み込み、辞書として返す。
+# ---------------------------------------------------------------------------
+# OpenAlex API によるジャーナル被引用数取得
+# ---------------------------------------------------------------------------
 
-    Args:
-        csv_path: journal_if.csv のパス
+def load_openalex_cache(cache_path: Path = DEFAULT_CACHE_PATH) -> dict[str, float | None]:
+    """キャッシュファイルを読み込む。存在しなければ空辞書を返す。"""
+    if cache_path.exists():
+        try:
+            return json.loads(cache_path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.warning("キャッシュ読み込みに失敗しました: %s", cache_path)
+    return {}
 
-    Returns:
-        {ジャーナル名(小文字): IF} の辞書
-    """
-    csv_path = Path(csv_path)
-    if not csv_path.exists():
-        logger.warning("IF データファイルが見つかりません: %s", csv_path)
-        return {}
 
+def save_openalex_cache(cache: dict[str, float | None], cache_path: Path = DEFAULT_CACHE_PATH) -> None:
+    """キャッシュを JSON ファイルに保存する。"""
     try:
-        df = pd.read_csv(csv_path)
-        if_dict: dict[str, float] = {}
-        for _, row in df.iterrows():
-            name = str(row["journal_name"]).strip().lower()
-            if_val = float(row["impact_factor"])
-            if_dict[name] = if_val
-        logger.info("IF データを %d 件読み込みました。", len(if_dict))
-        return if_dict
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(
+            json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
     except Exception:
-        logger.error("IF データの読み込みに失敗しました。", exc_info=True)
-        return {}
+        logger.warning("キャッシュ保存に失敗しました: %s", cache_path, exc_info=True)
 
 
-def get_impact_factor(journal: str, if_dict: dict[str, float]) -> str:
-    """ジャーナル名から IF を取得する。
-
-    完全一致 → 部分一致の順で検索する。
+def _fetch_openalex_citedness(journal: str) -> float | None:
+    """OpenAlex API からジャーナルの2年平均被引用数を取得する。
 
     Args:
         journal: ジャーナル名
-        if_dict: {ジャーナル名(小文字): IF} の辞書
 
     Returns:
-        IF の文字列表現（見つからなければ "N/A"）
+        2年平均被引用数（float）。取得失敗時は None。
     """
-    if not if_dict or not journal:
+    encoded = urllib.parse.quote(journal)
+    url = (
+        f"https://api.openalex.org/sources"
+        f"?filter=display_name.search:{encoded}"
+        f"&per-page=1"
+        f"&select=display_name,2yr_mean_citedness"
+    )
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "PubMedReporter/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        results = data.get("results", [])
+        if results:
+            val = results[0].get("2yr_mean_citedness")
+            return float(val) if val is not None else None
+    except Exception as e:
+        logger.warning("OpenAlex API エラー (%s): %s", journal, e)
+    return None
+
+
+def get_impact_factor(
+    journal: str,
+    cache: dict[str, float | None],
+    cache_path: Path = DEFAULT_CACHE_PATH,
+) -> str:
+    """ジャーナル名から2年平均被引用数を取得する（キャッシュ優先）。
+
+    Args:
+        journal: ジャーナル名
+        cache: {ジャーナル名(小文字): 被引用数 or None} のキャッシュ辞書
+        cache_path: キャッシュファイルのパス
+
+    Returns:
+        被引用数の文字列（例: "5.3"）。取得できなければ "N/A"。
+    """
+    if not journal:
         return "N/A"
 
-    journal_lower = journal.strip().lower()
+    key = journal.strip().lower()
 
-    # 完全一致
-    if journal_lower in if_dict:
-        return f"{if_dict[journal_lower]:.1f}"
+    if key not in cache:
+        logger.debug("OpenAlex API 問い合わせ: %s", journal)
+        val = _fetch_openalex_citedness(journal)
+        cache[key] = val
+        save_openalex_cache(cache, cache_path)
+        # API レート制限を避けるため短時間待機
+        time.sleep(0.5)
 
-    # 部分一致（辞書キーがジャーナル名に含まれる、またはその逆）
-    for key, value in if_dict.items():
-        if key in journal_lower or journal_lower in key:
-            return f"{value:.1f}"
-
-    return "N/A"
+    val = cache[key]
+    return f"{val:.1f}" if val is not None else "N/A"
 
 
-# クォータ超過時のフォールバックモデル順序
-# 2.0系はフリープランで利用不可のため、2.5系を優先
+# ---------------------------------------------------------------------------
+# Gemini AI 要約
+# ---------------------------------------------------------------------------
+
+# フォールバックモデル順序
 FALLBACK_MODELS = [
+    "gemini-3.1-flash-lite",
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
-    # "gemini-2.0-flash",  # クォータ0のため除外
-    # "gemini-2.0-flash-lite", # クォータ0のため除外
 ]
 
 
 def _get_fallback_models(primary_model: str) -> list[str]:
-    """プライマリモデルを先頭にしたフォールバックリストを生成する。
-    ただし、2.0系（クォータ0）の場合はリストから除外/後回しにする。
-    """
-    models = []
-    
-    # プライマリモデルが2.5系なら先頭に追加
-    if "2.5" in primary_model:
-        models.append(primary_model)
-    elif "2.0" in primary_model:
-        logger.warning(
-            "モデル '%s' はフリープランのクォータが0の可能性があります。"
-            "gemini-2.5-flash 系を優先します。",
-            primary_model
-        )
-
-    # フォールバックモデルを追加
+    """プライマリモデルを先頭にしたフォールバックリストを生成する。"""
+    models = [primary_model]
     for m in FALLBACK_MODELS:
         if m not in models:
             models.append(m)
-            
     return models
 
 
@@ -143,7 +164,6 @@ def summarize_abstract(
         f"抄録:\n{abstract}"
     )
 
-    # セーフティ設定（医学コンテンツがブロックされないよう緩和）
     safety_settings = [
         types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
         types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
@@ -180,7 +200,6 @@ def summarize_abstract(
             except Exception as e:
                 error_msg = str(e)
 
-                # クォータ超過 → 次のモデルにフォールバック
                 if "429" in error_msg or "ResourceExhausted" in error_msg:
                     logger.warning(
                         "モデル '%s' のクォータ超過を検出。次のモデルに切り替えます。",
@@ -193,48 +212,42 @@ def summarize_abstract(
                     model, attempt + 1, max_retries + 1, error_msg,
                 )
 
-            # リトライ待機
             if attempt < max_retries:
                 wait = 3 * (attempt + 1)
                 logger.info("  → %d 秒後にリトライします...", wait)
                 time.sleep(wait)
-        else:
-            # for ループが break せずに完了 = 全リトライ失敗（クォータ超過以外）
-            continue
-        # break で抜けた = クォータ超過 → 次のモデルへ continue
-        continue
 
-    # 全モデル・全リトライ失敗時のフォールバック
     truncated = abstract[:200] + ("..." if len(abstract) > 200 else "")
     return f"（要約失敗・原文抜粋）{truncated}"
 
 
+# ---------------------------------------------------------------------------
+# メインのエンリッチメント関数
+# ---------------------------------------------------------------------------
+
 def enrich_articles(
     articles: list[dict[str, Any]],
     gemini_api_key: str = "",
-    gemini_model_name: str = "gemini-2.5-flash",
-    if_csv_path: str | Path = DEFAULT_IF_CSV,
+    gemini_model_name: str = "gemini-3.1-flash-lite",
+    cache_path: str | Path = DEFAULT_CACHE_PATH,
 ) -> list[dict[str, Any]]:
-    """論文リストに IF と AI 要約を付与する。
+    """論文リストに2年平均被引用数と AI 要約を付与する。
 
     Args:
         articles: 論文情報の辞書リスト
         gemini_api_key: Gemini API キー（空文字列の場合は要約スキップ）
         gemini_model_name: 使用する Gemini モデル名
-        if_csv_path: ジャーナル IF CSV のパス
+        cache_path: OpenAlex キャッシュファイルのパス
 
     Returns:
-        IF と要約が付与された論文リスト
+        被引用数と要約が付与された論文リスト
     """
-    # IF 辞書を読み込み
-    if_dict = load_impact_factors(if_csv_path)
+    cache_path = Path(cache_path)
+    openalex_cache = load_openalex_cache(cache_path)
 
-    # Gemini クライアントを初期化
     client = None
-    
-    # モデルリストを生成（2.0系なら2.5系を優先）
     fallback_models = _get_fallback_models(gemini_model_name)
-    active_model = fallback_models[0] # デフォルトはリスト先頭
+    active_model = fallback_models[0]
 
     if gemini_api_key:
         try:
@@ -242,7 +255,6 @@ def enrich_articles(
 
             client = genai.Client(api_key=gemini_api_key)
 
-            # テスト呼び出しで動作確認（フォールバック付き）
             test_ok = False
             for model in fallback_models:
                 try:
@@ -264,26 +276,22 @@ def enrich_articles(
                             "モデル '%s' はクォータ超過。次のモデルを試行します。", model
                         )
                         continue
-                    raise  # 429 以外のエラーは再送出
+                    raise
 
             if not test_ok:
                 logger.error("全モデルのクォータが超過しています。AI要約は利用できません。")
                 client = None
 
         except Exception as e:
-            logger.error(
-                "Gemini の初期化/テストに失敗: %s", str(e), exc_info=True
-            )
+            logger.error("Gemini の初期化/テストに失敗: %s", str(e), exc_info=True)
             client = None
     else:
-        logger.warning(
-            "GEMINI_API_KEY が未設定のため、AI 要約をスキップします。"
-        )
+        logger.warning("GEMINI_API_KEY が未設定のため、AI 要約をスキップします。")
 
     for i, article in enumerate(articles):
-        # IF 付与
+        # 2年平均被引用数を付与
         article["impact_factor"] = get_impact_factor(
-            article.get("journal", ""), if_dict
+            article.get("journal", ""), openalex_cache, cache_path
         )
 
         # AI 要約
@@ -292,7 +300,6 @@ def enrich_articles(
             article["summary_ja"] = summarize_abstract(
                 abstract, client, active_model, fallback_models
             )
-            # Gemini API レート制限対策（RPM を考慮して待機）
             if i < len(articles) - 1:
                 time.sleep(4.0)
         else:
@@ -303,7 +310,7 @@ def enrich_articles(
                 article["summary_ja"] = "抄録なし"
 
         logger.info(
-            "[%d/%d] %s (IF: %s)",
+            "[%d/%d] %s (2yr被引用数: %s)",
             i + 1,
             len(articles),
             article.get("title", "")[:50],

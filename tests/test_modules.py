@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -13,7 +14,7 @@ import pytest
 
 # テスト対象モジュール
 from config import Config
-from enrichment import _get_fallback_models, get_impact_factor, load_impact_factors
+from enrichment import _get_fallback_models, get_impact_factor, load_openalex_cache
 from keyword_translator import KEYWORD_MAP, translate_keyword
 from reporter import build_html_report
 
@@ -36,6 +37,7 @@ class TestConfig:
             assert config.smtp_port == 587
             assert config.debug_mode is False
             assert config.recipient_emails == []
+            assert config.gemini_model == "gemini-3.1-flash-lite"
 
     def test_from_env_with_values(self):
         """環境変数設定時の値。"""
@@ -111,55 +113,57 @@ class TestKeywordTranslator:
 class TestEnrichment:
     """メタデータ付与のテスト。"""
 
-    def test_load_impact_factors(self):
-        """IF CSV の読み込み。"""
-        csv_path = Path(__file__).resolve().parent.parent / "data" / "journal_if.csv"
-        if csv_path.exists():
-            if_dict = load_impact_factors(csv_path)
-            assert len(if_dict) > 0
-            # 主要ジャーナルが含まれているか
-            assert "ophthalmology" in if_dict
-            assert if_dict["ophthalmology"] > 0
-
-    def test_load_impact_factors_missing_file(self):
+    def test_load_openalex_cache_missing_file(self):
         """存在しないファイルの場合は空辞書。"""
-        if_dict = load_impact_factors("/nonexistent/path.csv")
-        assert if_dict == {}
+        cache = load_openalex_cache(Path("/nonexistent/cache.json"))
+        assert cache == {}
+
+    def test_load_openalex_cache_valid(self, tmp_path):
+        """有効なキャッシュファイルを読み込む。"""
+        cache_file = tmp_path / "cache.json"
+        cache_file.write_text(json.dumps({"ophthalmology": 13.7}), encoding="utf-8")
+        cache = load_openalex_cache(cache_file)
+        assert cache == {"ophthalmology": 13.7}
 
     def test_get_fallback_models(self):
-        """フォールバックモデルの生成ロジックをテスト。"""
-        # 2.5系の場合はそのまま先頭
-        models_25 = _get_fallback_models("gemini-2.5-flash")
-        assert models_25[0] == "gemini-2.5-flash"
+        """フォールバックモデルの生成ロジック。"""
+        models = _get_fallback_models("gemini-3.1-flash-lite")
+        assert models[0] == "gemini-3.1-flash-lite"
+        assert "gemini-2.5-flash" in models
 
-        # 2.0系の場合は警告が出つつ、2.5系が優先される（リストに含まれる）
-        models_20 = _get_fallback_models("gemini-2.0-flash")
-        assert "gemini-2.0-flash" not in models_20 # 除外されているはず
-        assert "gemini-2.5-flash" in models_20
-        assert models_20[0] == "gemini-2.5-flash"
+        models_custom = _get_fallback_models("gemini-2.5-flash")
+        assert models_custom[0] == "gemini-2.5-flash"
 
-    def test_get_impact_factor_exact(self):
-        """完全一致でのIF検索。"""
-        if_dict = {"ophthalmology": 13.7, "retina": 3.2}
-        assert get_impact_factor("Ophthalmology", if_dict) == "13.7"
-        assert get_impact_factor("Retina", if_dict) == "3.2"
+    @patch("enrichment._fetch_openalex_citedness")
+    def test_get_impact_factor_cache_hit(self, mock_fetch, tmp_path):
+        """キャッシュにある場合はAPIを呼ばない。"""
+        cache = {"ophthalmology": 13.7}
+        cache_path = tmp_path / "cache.json"
+        result = get_impact_factor("Ophthalmology", cache, cache_path)
+        assert result == "13.7"
+        mock_fetch.assert_not_called()
 
-    def test_get_impact_factor_partial(self):
-        """部分一致でのIF検索。"""
-        if_dict = {"british journal of ophthalmology": 4.1}
-        result = get_impact_factor(
-            "The British Journal of Ophthalmology", if_dict
-        )
-        assert result == "4.1"
+    @patch("enrichment._fetch_openalex_citedness", return_value=5.2)
+    def test_get_impact_factor_cache_miss(self, mock_fetch, tmp_path):
+        """キャッシュにない場合はAPIを呼んでキャッシュする。"""
+        cache: dict[str, float | None] = {}
+        cache_path = tmp_path / "cache.json"
+        result = get_impact_factor("Retina", cache, cache_path)
+        assert result == "5.2"
+        assert "retina" in cache
+        mock_fetch.assert_called_once_with("Retina")
 
-    def test_get_impact_factor_not_found(self):
-        """見つからない場合は N/A。"""
-        if_dict = {"ophthalmology": 13.7}
-        assert get_impact_factor("Unknown Journal", if_dict) == "N/A"
+    @patch("enrichment._fetch_openalex_citedness", return_value=None)
+    def test_get_impact_factor_not_found(self, mock_fetch, tmp_path):
+        """API で見つからない場合は N/A。"""
+        cache: dict[str, float | None] = {}
+        cache_path = tmp_path / "cache.json"
+        result = get_impact_factor("Unknown Journal", cache, cache_path)
+        assert result == "N/A"
 
-    def test_get_impact_factor_empty(self):
-        """空辞書の場合は N/A。"""
-        assert get_impact_factor("Ophthalmology", {}) == "N/A"
+    def test_get_impact_factor_empty_journal(self, tmp_path):
+        """空ジャーナル名は N/A。"""
+        assert get_impact_factor("", {}, tmp_path / "c.json") == "N/A"
 
 
 # ============================================================
@@ -224,7 +228,6 @@ class TestReporter:
         articles = self._sample_articles()
         html = build_html_report(articles, "眼科", "ophthalmology")
 
-        # IF 13.7 の論文が IF 3.2 より先に出現するか
         pos_high = html.index("13.7")
         pos_low = html.index("3.2")
         assert pos_high < pos_low

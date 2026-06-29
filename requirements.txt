@@ -1,5 +1,4 @@
 biopython>=1.81
 google-genai>=1.0
-pandas>=2.0
 python-dotenv>=1.0
 pytest>=7.0
