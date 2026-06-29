@@ -39,7 +39,7 @@ def build_html_report(
         try:
             return -float(a.get("impact_factor", 0))
         except (ValueError, TypeError):
-            return 0.0
+            return float("inf")
 
     sorted_articles = sorted(articles, key=sort_key)
 

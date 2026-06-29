@@ -45,17 +45,10 @@ def save_openalex_cache(cache: dict[str, float | None], cache_path: Path = DEFAU
         logger.warning("キャッシュ保存に失敗しました: %s", cache_path, exc_info=True)
 
 
-def _fetch_openalex_citedness(journal: str) -> float | None:
-    """OpenAlex API からジャーナルの2年平均被引用数を取得する。
-
-    Args:
-        journal: ジャーナル名
-
-    Returns:
-        2年平均被引用数（float）。取得失敗時は None。
-    """
-    # search= を使用（filter+select の組み合わせだと数字始まりフィールド名で400エラー）
-    encoded = urllib.parse.quote(journal)
+def _query_openalex(search_term: str) -> float | None:
+    """OpenAlex API に1回問い合わせてジャーナルの2年平均被引用数を返す。"""
+    import re as _re
+    encoded = urllib.parse.quote(search_term)
     url = f"https://api.openalex.org/sources?search={encoded}&per-page=1"
     try:
         req = urllib.request.Request(
@@ -66,11 +59,39 @@ def _fetch_openalex_citedness(journal: str) -> float | None:
             data = json.loads(resp.read().decode("utf-8"))
         results = data.get("results", [])
         if results:
-            # 2yr_mean_citedness は summary_stats の中に格納されている
             val = results[0].get("summary_stats", {}).get("2yr_mean_citedness")
             return float(val) if val is not None else None
     except Exception as e:
-        logger.warning("OpenAlex API エラー (%s): %s", journal, e)
+        logger.warning("OpenAlex API エラー (%s): %s", search_term, e)
+    return None
+
+
+def _fetch_openalex_citedness(journal: str) -> float | None:
+    """OpenAlex API からジャーナルの2年平均被引用数を取得する。
+
+    括弧付きジャーナル名（例: "Eye (London, England)"）で見つからない場合、
+    括弧部分を除去してリトライする。
+    """
+    import re as _re
+
+    val = _query_openalex(journal)
+    if val is not None:
+        return val
+
+    # "Eye (London, England)" → "Eye" のように括弧部分を除去してリトライ
+    cleaned = _re.sub(r"\s*\(.*?\)\s*", " ", journal).strip()
+    if cleaned and cleaned != journal:
+        logger.debug("括弧除去でリトライ: '%s' → '%s'", journal, cleaned)
+        val = _query_openalex(cleaned)
+        if val is not None:
+            return val
+
+    # "Canadian journal of ophthalmology. Journal canadien..." → ピリオド/コロン前だけ
+    main_title = _re.split(r"\s*[.:]\s+", journal)[0].strip()
+    if main_title and main_title != journal and main_title != cleaned:
+        logger.debug("サブタイトル除去でリトライ: '%s' → '%s'", journal, main_title)
+        return _query_openalex(main_title)
+
     return None
 
 
